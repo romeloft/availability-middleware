@@ -1,89 +1,71 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
+from typing import Optional
 import requests
+from bs4 import BeautifulSoup
+import aiohttp
+import asyncio
 
 app = FastAPI()
 
-SOPRANO_API_URL = "https://soprano-villas-api-production.up.railway.app/get_price"
-API_SECRET = "supersecretkey123"
+# ----------------------
+# MODELS
+# ----------------------
+class AvailabilityRequest(BaseModel):
+    region: str
+    checkin: str
+    checkout: str
+    adults: int
+    villa_name: Optional[str] = None
 
+
+# ----------------------
+# HEADERS FOR CLOUDFLARE BYPASS
+# ----------------------
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/html, */*;q=0.8",
-    "Referer": "https://www.sopranovillas.com/"
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://www.sopranovillas.com/",
+    "x-api-secret": "supersecretkey123"
 }
 
-class CrispPayload(BaseModel):
-    region: str = None
-    checkin: str = None
-    checkout: str = None
-    adults: int = None
-    villa_name: str = None
 
-@app.get("/")
-def home():
-    return {"message": "Middleware is running!"}
-
-@app.post("/check_availability")
-async def check_availability(payload: CrispPayload):
+# ----------------------
+# LINK REACHABILITY CHECK
+# ----------------------
+async def check_link(session, url):
     try:
-        params = {
-            "region": payload.region,
-            "checkin": payload.checkin,
-            "checkout": payload.checkout,
-            "adults": payload.adults
-        }
-
-        # Call Sopranovillas API
-        res = requests.get(SOPRANO_API_URL, params=params, headers={"x-api-secret": API_SECRET, **HEADERS}, timeout=20)
-        data = res.json()
-
-        if not data.get("success"):
-            return {"text": "⚠️ Error checking availability, please try again."}
-
-        villas = data.get("results", [])
-        if not villas:
-            return {"text": "❌ No villas available for the requested dates."}
-
-        # If villa_name specified, filter by name
-        if payload.villa_name:
-            matched_villa = next((v for v in villas if payload.villa_name.lower() in v["name"].lower()), None)
-            if matched_villa:
-                if check_link_reachability(matched_villa["url"]):
-                    return {"text": format_single_villa(matched_villa)}
-                else:
-                    return {"text": f"⚠️ The villa '{payload.villa_name}' exists but the link is unreachable. Please contact us."}
-            else:
-                return {"text": f"❌ Villa '{payload.villa_name}' is not available. Here are alternatives:\n" + format_villas_list(villas)}
-
-        # Otherwise, return top 3 available villas
-        return {"text": format_villas_list(villas)}
-
-    except Exception as e:
-        return {"text": f"⚠️ Error: {str(e)}"}
-
-def check_link_reachability(url: str) -> bool:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=8)
-        return r.status_code == 200
+        async with session.get(url, timeout=10) as response:
+            return url, response.status == 200
     except:
-        return False
+        return url, False
 
-def format_single_villa(villa: dict) -> str:
-    return (f"✅ **{villa['name']}** is available!\n"
-            f"Price: {villa['price']}\n"
-            f"Bedrooms: {villa['bedrooms']} | Bathrooms: {villa['bathrooms']}\n"
-            f"[Book Now]({villa['url']})")
 
-def format_villas_list(villas: list) -> str:
-    reply = "🏡 **Available Villas:**\n"
-    count = 0
-    for villa in villas:
-        if count >= 3:
-            break
-        if check_link_reachability(villa["url"]):
-            reply += f"- {villa['name']} ({villa['price']}) → {villa['url']}\n"
-            count += 1
-    if count == 0:
-        return "⚠️ No valid villa links are reachable at the moment."
-    return reply
+async def filter_broken_links(results):
+    async with aiohttp.ClientSession() as session:
+        tasks = [check_link(session, villa["url"]) for villa in results]
+        checks = await asyncio.gather(*tasks)
+        return [villa for villa, (url, ok) in zip(results, checks) if ok]
+
+
+# ----------------------
+# SCRAPING FUNCTION
+# ----------------------
+def scrape_villas(region, checkin, checkout, adults, villa_name=None):
+    url = f"https://www.sopranovillas.com/wp-admin/admin-ajax.php?action=so_get_villa_results&region={region}&checkin={checkin}&checkout={checkout}&adults={adults}"
+    response = requests.get(url, headers=HEADERS)
+
+    if response.status_code == 403:
+        raise HTTPException(status_code=403, detail="Cloudflare blocked the request. Check headers and rules.")
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=f"Error fetching data from Sopranovillas")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    villas = []
+
+    for villa_div in soup.find_all("div", class_="result-wrapper"):
+        name = villa_div.get("data-property-name", "").strip()
+        price = villa_div.get("data-price", "").strip()
+
+        i
