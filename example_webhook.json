@@ -1,0 +1,7 @@
+{
+  "region": "{{region}}",
+  "checkin": "{{checkin_date}}",
+  "checkout": "{{checkout_date}}",
+  "adults": "{{guests}}",
+  "villa_name": "{{villa_name}}"
+}
